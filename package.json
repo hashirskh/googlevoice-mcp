@@ -1,0 +1,30 @@
+{
+  "name": "mcp-googlevoice",
+  "version": "0.0.1",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/server.js",
+  "bin": {
+    "mcp-googlevoice": "./dist/server.js"
+  },
+  "files": [
+    "dist/",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "start": "npm run build && node dist/server.js",
+    "dev": "npx tsx server.ts",
+    "prepublishOnly": "npm run build",
+    "pack:openclaw": "tar -czf googlevoice-openclaw-plugin.tgz openclaw.plugin.json skills .mcp.json README.md package.json package-lock.json server.ts browser.ts actions.ts selectors.ts types.ts tsconfig.json"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "playwright": "^1.52.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.0.0"
+  }
+}

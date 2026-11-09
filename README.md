@@ -252,4 +252,3 @@ This repository is a Windows-capable adaptation of [zhuqf/googlevoice-mcp](https
 Changes include system Chrome discovery on Windows, a dedicated browser profile and localhost debugging port, multiline compose verification, checking visible Google Voice send errors, and a write guard (`GOOGLEVOICE_ALLOW_WRITES=1`) for send/reply/mark-read actions. The server reports submission, which does not prove delivery. Google Voice can limit automated sends. Do not commit browser profiles, cookies, or credentials.
 
 For local development: `npm ci --ignore-scripts` followed by `npm run build`. Install Google Chrome separately. Set `GOOGLEVOICE_STATE_DIR` to a private local directory, `GOOGLEVOICE_DEBUG_PORT` to an available localhost port, and keep writes disabled until a specific send is authorized.
-
