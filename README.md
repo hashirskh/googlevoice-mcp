@@ -2,7 +2,7 @@
 
 An unofficial MCP server for Google Voice SMS. It provides tools to check login, list and read conversations, send and reply to SMS, and mark conversations read. Google Voice has no public SMS API for this use case; the server automates the Google Voice website through system Chrome and Playwright's Chrome DevTools Protocol connection. Google can change or restrict this behavior at any time.
 
-This version adapts [zhuqf/googlevoice-mcp](https://github.com/zhuqf/googlevoice-mcp) at commit `4e0b2df33a0661cc6df6dbbf1b41ff1f93f53b54`. It includes Windows Chrome discovery, localhost-only debugging, a write guard, and checks around multiline composition and visible send errors. The upstream MIT license is retained in [LICENSE](LICENSE).
+This repository includes Windows Chrome discovery, localhost-only debugging, a write guard, and checks around multiline composition and visible send errors. See [LICENSE](LICENSE) for the applicable license.
 
 ## Requirements
 
@@ -31,7 +31,7 @@ Set these environment variables in your MCP client:
 | `GOOGLEVOICE_DEBUG_PORT` | A free localhost port, for example `19223`. |
 | `GOOGLEVOICE_ALLOW_WRITES` | Leave unset or `0` while setting up. Set to `1` only when you intend to allow send, reply, and mark-read tools. |
 
-Register the server in your MCP client with the absolute path to `node` and the absolute path to `dist/server.js`. For Codex, configure a local stdio MCP server named `googlevoice`; then restart the client or start a new chat. The repository's npm package name is inherited from upstream, so `npx mcp-googlevoice` may run the upstream published package rather than the code in this repository. Use the locally built server path when you want this version.
+Register the server in your MCP client with the absolute path to `node` and the absolute path to `dist/server.js`. For Codex, configure a local stdio MCP server named `googlevoice`; then restart the client or start a new chat. The npm package name is not unique to this Git repository, so `npx mcp-googlevoice` may run a different published package. Use the locally built server path when you want this version.
 
 ## Sign in
 
@@ -58,4 +58,5 @@ Opening a conversation can itself change its read status. Before using `gv_list_
 The local changes fill the complete message without Enter keystrokes, verify the composed text before clicking Send once, and check visible Google Voice send errors. `gv_send_sms` can accept multiple recipients, which may create a group conversation; use one phone number per call for separate texts. A successful tool response means submission to the Google Voice interface, **not confirmed delivery**. Google Voice can reject, delay, or limit messages. Verify receipt or the conversation's status, and never automatically retry an uncertain send.
 
 Do not commit `node_modules`, `dist`, state directories, browser profiles, cookies, or credentials. The included `.gitignore` excludes common local artifacts, but always review `git status` before publishing changes.
+
 
