@@ -1,4 +1,4 @@
-# Google Voice MCP (Windows-capable adaptation)
+# Google Voice MCP
 
 An unofficial MCP server for Google Voice SMS. It provides tools to check login, list and read conversations, send and reply to SMS, and mark conversations read. Google Voice has no public SMS API for this use case; the server automates the Google Voice website through system Chrome and Playwright's Chrome DevTools Protocol connection. Google can change or restrict this behavior at any time.
 
