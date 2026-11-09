@@ -1,254 +1,61 @@
-# mcp-googlevoice
+# Google Voice MCP (Windows-capable adaptation)
 
-MCP server that provides Google Voice SMS tools for any MCP-compatible AI agent harness.
+An unofficial MCP server for Google Voice SMS. It provides tools to check login, list and read conversations, send and reply to SMS, and mark conversations read. Google Voice has no public SMS API for this use case; the server automates the Google Voice website through system Chrome and Playwright's Chrome DevTools Protocol connection. Google can change or restrict this behavior at any time.
 
-Since Google Voice has no public API, this server uses system Chromium with Playwright (via CDP) for browser automation against the Google Voice web interface.
-
-## Tools
-
-| Tool | Description |
-|------|-------------|
-| `gv_login` | Open browser for Google login |
-| `gv_check_login` | Check login status |
-| `gv_list_sms` | List SMS conversations (`filter`: all/unread, `limit`) |
-| `gv_read_sms` | Read messages in a conversation (`filter`: all/unread, `limit`) |
-| `gv_send_sms` | Send SMS to phone number(s) — supports single or multiple recipients |
-| `gv_reply_sms` | Reply to a conversation |
-| `gv_mark_read` | Mark conversation as read |
+This version adapts [zhuqf/googlevoice-mcp](https://github.com/zhuqf/googlevoice-mcp) at commit `4e0b2df33a0661cc6df6dbbf1b41ff1f93f53b54`. It includes Windows Chrome discovery, localhost-only debugging, a write guard, and checks around multiline composition and visible send errors. The upstream MIT license is retained in [LICENSE](LICENSE).
 
 ## Requirements
 
-- Node.js 18+
-- System Chromium or Google Chrome (`sudo apt install chromium` or install Google Chrome)
-- Xvfb for headless servers (`sudo apt install xvfb`)
+- Node.js 18 or newer
+- System Google Chrome or Chromium
+- On Linux headless servers, Xvfb
 
-> Playwright is installed as a dependency for its automation library. The actual browser used at runtime is your **system** Chrome/Chromium — not Playwright's bundled browser — to avoid Google's automation detection.
+Playwright is used as an automation library; the server runs your installed Chrome. Its browser profile contains your Google session and must stay private.
 
-## Configuration
+## Install from this repository
 
-All harnesses use the same `npx` command. The only difference is which file you add the config to.
-
-### Claude Desktop
-
-File: `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS)  
-File: `%APPDATA%\Claude\claude_desktop_config.json` (Windows)
-
-```json
-{
-  "mcpServers": {
-    "googlevoice": {
-      "command": "npx",
-      "args": ["-y", "mcp-googlevoice"]
-    }
-  }
-}
-```
-
-### Claude Code
-
-File: `.mcp.json` in your project root, or `~/.claude/mcp.json` globally.
-
-```json
-{
-  "mcpServers": {
-    "googlevoice": {
-      "command": "npx",
-      "args": ["-y", "mcp-googlevoice"]
-    }
-  }
-}
-```
-
-### Cursor
-
-File: `~/.cursor/mcp.json` (global) or `.cursor/mcp.json` (per-project).
-
-```json
-{
-  "mcpServers": {
-    "googlevoice": {
-      "command": "npx",
-      "args": ["-y", "mcp-googlevoice"]
-    }
-  }
-}
-```
-
-### Windsurf
-
-File: `~/.windsurf/mcp_config.json`
-
-```json
-{
-  "mcpServers": {
-    "googlevoice": {
-      "command": "npx",
-      "args": ["-y", "mcp-googlevoice"]
-    }
-  }
-}
-```
-
-### VS Code (GitHub Copilot)
-
-File: `.vscode/mcp.json` in your workspace.
-
-```json
-{
-  "servers": {
-    "googlevoice": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "mcp-googlevoice"]
-    }
-  }
-}
-```
-
-### Alternative: global install
-
-Install once, then reference by name (no `npx` needed):
-
-```bash
-npm install -g mcp-googlevoice
-```
-
-```json
-{
-  "mcpServers": {
-    "googlevoice": {
-      "command": "mcp-googlevoice"
-    }
-  }
-}
-```
-
-Ready-to-use config files for each harness are also in the [`configs/`](./configs/) directory of this repo.
-
-## Environment Variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GOOGLEVOICE_STATE_DIR` | `~/.local/share/openclaw/googlevoice` | Directory for browser profile and state |
-| `GOOGLEVOICE_DEBUG_PORT` | `9222` | Chrome remote debugging port |
-
-Set them in the `env` block of your harness config if you need non-default values:
-
-```json
-{
-  "mcpServers": {
-    "googlevoice": {
-      "command": "npx",
-      "args": ["-y", "mcp-googlevoice"],
-      "env": {
-        "GOOGLEVOICE_STATE_DIR": "/home/youruser/.local/share/mcp-googlevoice",
-        "GOOGLEVOICE_DEBUG_PORT": "9223"
-      }
-    }
-  }
-}
-```
-
-## First-Time Login
-
-Because Google Voice requires interactive authentication (including 2FA), the first-time setup uses Chrome remote debugging:
-
-1. Call `gv_login` — system Chromium launches with Xvfb and remote debugging on port 9222
-2. From your local machine, set up an SSH tunnel:
-   ```
-   ssh -L 9222:localhost:9222 <your-server>
-   ```
-3. Open Chrome locally, go to `chrome://inspect/#devices`
-4. Click "Configure..." and add `localhost:9222`
-5. Click "inspect" on the Google Voice target
-6. Complete Google login (including 2FA) in the DevTools window
-7. Once you see Google Voice Messages, call `gv_check_login` to verify
-
-After login, Chrome runs as a detached background process. It survives MCP/harness restarts and preserves the session — no re-login needed as long as Chrome keeps running.
-
-## How It Works
-
-All browser operations use a single system Chromium process (not Playwright's bundled browser, which Google detects and blocks). Playwright connects to it via CDP (Chrome DevTools Protocol).
-
-- **Login**: `gv_login` launches system Chromium with Xvfb and remote debugging. The user connects via SSH tunnel + `chrome://inspect` to complete interactive login/2FA.
-- **Operations**: `ensureBrowser()` launches Chromium if not already running, then Playwright connects via `connectOverCDP()` to automate SMS operations.
-- **Persistence**: Chrome runs as a detached background process and survives MCP restarts. Playwright disconnects on shutdown but reconnects on next operation.
-- **Idle cleanup**: Playwright connection auto-disconnects after 5 min idle (Chrome keeps running).
-
-## OpenClaw Plugin
-
-This repo also ships as an OpenClaw-native plugin plus an MCP server config. The native plugin keeps a stable plugin id (`googlevoice`) while showing the friendly name `Google Voice SMS`.
-
-### Install for OpenClaw
-
-```bash
-# From local directory (development)
-openclaw plugins install /path/to/googlevoice-mcp --dangerously-force-unsafe-install
-
-# Or track live source edits
-openclaw plugins install /path/to/googlevoice-mcp --link --dangerously-force-unsafe-install
-
-# Register the Google Voice MCP server for tool access
-openclaw mcp set googlevoice '{"command":"npx","args":["-y","mcp-googlevoice"]}'
-
-# Reload OpenClaw
-openclaw gateway restart
-```
-
-The unsafe-install flag is required because the server launches system Chromium/Xvfb for Google Voice browser automation.
-
-### Install from archive
-
-```bash
-npm run pack:openclaw            # creates googlevoice-openclaw-plugin.tgz
-openclaw plugins install ./googlevoice-openclaw-plugin.tgz --dangerously-force-unsafe-install
-openclaw mcp set googlevoice '{"command":"npx","args":["-y","mcp-googlevoice"]}'
-openclaw gateway restart
-```
-
-### What the plugin provides
-
-| Feature | Detail |
-|---------|--------|
-| Plugin id | `googlevoice` |
-| Plugin name | `Google Voice SMS` |
-| Skill: `googlevoice` | Interactive login guidance, status check, and SMS usage workflow |
-| MCP tools | `gv_login`, `gv_check_login`, `gv_list_sms`, `gv_read_sms`, `gv_send_sms`, `gv_reply_sms`, `gv_mark_read` — registered as `googlevoice__<tool>` after `openclaw mcp set` |
-| MCP transport | stdio via `npx mcp-googlevoice` |
-
-### OpenClaw layout
-
-```
-openclaw.plugin.json        ← OpenClaw-native plugin manifest (id: googlevoice, name: Google Voice SMS)
-skills/googlevoice/SKILL.md ← Google Voice setup and usage skill
-.mcp.json                   ← compatibility MCP server config (npx mcp-googlevoice)
-```
-
-### Verify install
-
-```bash
-openclaw plugins list                    # should show id googlevoice, name Google Voice SMS
-openclaw plugins inspect googlevoice     # check plugin metadata and skill
-openclaw mcp show googlevoice            # check MCP server config
-```
-
-Then ask OpenClaw to configure Google Voice or call the `gv_login`/`gv_check_login` MCP tools through the `googlevoice` skill flow.
-
-## Development
-
-```bash
-git clone <repo>
+```sh
+git clone https://github.com/hashirskh/googlevoice-mcp.git
 cd googlevoice-mcp
-npm install
-npm run dev          # run directly with tsx (no build needed)
-npm run build        # compile TypeScript → dist/
-node dist/server.js  # run compiled output
-npm run pack:openclaw # create googlevoice-openclaw-plugin.tgz
+npm ci --ignore-scripts
+npm run build
 ```
-## This version
 
-This repository is a Windows-capable adaptation of [zhuqf/googlevoice-mcp](https://github.com/zhuqf/googlevoice-mcp), based on upstream commit `4e0b2df33a0661cc6df6dbbf1b41ff1f93f53b54`. It retains the upstream license and attribution.
+`npm ci --ignore-scripts` avoids downloading Playwright's bundled browser. Install Chrome separately. To start the MCP server locally, run `node dist/server.js` from the repository directory. It communicates over stdio.
 
-Changes include system Chrome discovery on Windows, a dedicated browser profile and localhost debugging port, multiline compose verification, checking visible Google Voice send errors, and a write guard (`GOOGLEVOICE_ALLOW_WRITES=1`) for send/reply/mark-read actions. The server reports submission, which does not prove delivery. Google Voice can limit automated sends. Do not commit browser profiles, cookies, or credentials.
+Set these environment variables in your MCP client:
 
-For local development: `npm ci --ignore-scripts` followed by `npm run build`. Install Google Chrome separately. Set `GOOGLEVOICE_STATE_DIR` to a private local directory, `GOOGLEVOICE_DEBUG_PORT` to an available localhost port, and keep writes disabled until a specific send is authorized.
+| Name | Purpose |
+| --- | --- |
+| `GOOGLEVOICE_STATE_DIR` | Absolute path to a **private** local directory for the browser profile. Keep it outside the repository. |
+| `GOOGLEVOICE_DEBUG_PORT` | A free localhost port, for example `19223`. |
+| `GOOGLEVOICE_ALLOW_WRITES` | Leave unset or `0` while setting up. Set to `1` only when you intend to allow send, reply, and mark-read tools. |
+
+Register the server in your MCP client with the absolute path to `node` and the absolute path to `dist/server.js`. For Codex, configure a local stdio MCP server named `googlevoice`; then restart the client or start a new chat. The repository's npm package name is inherited from upstream, so `npx mcp-googlevoice` may run the upstream published package rather than the code in this repository. Use the locally built server path when you want this version.
+
+## Sign in
+
+Call `gv_login`, then sign in to the intended Google account **directly in the dedicated Chrome window** and complete any Google verification there. Open `https://voice.google.com/u/0/messages` in that same browser profile and call `gv_check_login`. If several Google accounts are in the profile, verify which account Google Voice selected. Never paste passwords, verification codes, cookies, or your browser profile into an agent chat or Git repository.
+
+On a remote Linux server, interactive login may require a localhost SSH tunnel and `chrome://inspect`. The remote debugging port must stay private; do not publish or forward it to an untrusted network.
+
+## Tools
+
+| Tool | Action |
+| --- | --- |
+| `gv_login` | Open system Chrome for interactive Google login |
+| `gv_check_login` | Check whether the Google Voice inbox is accessible |
+| `gv_list_sms` | List conversations |
+| `gv_read_sms` | Read a conversation |
+| `gv_send_sms` | Send a new SMS |
+| `gv_reply_sms` | Reply to a conversation |
+| `gv_mark_read` | Mark a conversation read |
+
+Opening a conversation can itself change its read status. Before using `gv_list_sms` for unread messages, inspect whether the current Google Voice interface still preserves unread state during listing.
+
+## Sending behavior and limits
+
+The local changes fill the complete message without Enter keystrokes, verify the composed text before clicking Send once, and check visible Google Voice send errors. `gv_send_sms` can accept multiple recipients, which may create a group conversation; use one phone number per call for separate texts. A successful tool response means submission to the Google Voice interface, **not confirmed delivery**. Google Voice can reject, delay, or limit messages. Verify receipt or the conversation's status, and never automatically retry an uncertain send.
+
+Do not commit `node_modules`, `dist`, state directories, browser profiles, cookies, or credentials. The included `.gitignore` excludes common local artifacts, but always review `git status` before publishing changes.
+
