@@ -14,8 +14,8 @@
   "scripts": {
     "build": "tsc",
     "start": "npm run build && node dist/server.js",
-    "dev": "npx tsx server.ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "test": "node --test safe-send.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.0",
@@ -23,8 +23,6 @@
   },
   "devDependencies": {
     "@types/node": "^25.6.0",
-    "tsx": "^4.21.0",
     "typescript": "^5.0.0"
   }
 }
-

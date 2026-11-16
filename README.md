@@ -29,7 +29,9 @@ Set these environment variables in your MCP client:
 | --- | --- |
 | `GOOGLEVOICE_STATE_DIR` | Absolute path to a **private** local directory for the browser profile. Keep it outside the repository. |
 | `GOOGLEVOICE_DEBUG_PORT` | A free localhost port, for example `19223`. |
-| `GOOGLEVOICE_ALLOW_WRITES` | Leave unset or `0` while setting up. Set to `1` only when you intend to allow send, reply, and mark-read tools. |
+| `GOOGLEVOICE_EXPECTED_ACCOUNT` | Your confirmed Google Voice account email. Set this locally before using account tools. |
+| `GOOGLEVOICE_ALLOW_WRITES` | Leave unset or `0` during setup. Set to `1` when you intend to allow writes. |
+| `GOOGLEVOICE_LIVE_CHIPS_VERIFIED` | Leave unset until you have checked a single matching recipient chip in the live composer without sending. Set to `1` after that check to allow SMS when writes are enabled. |
 
 Register the server in your MCP client with the absolute path to `node` and the absolute path to `dist/server.js`. For Codex, configure a local stdio MCP server named `googlevoice`; then restart the client or start a new chat. The npm package name is not unique to this Git repository, so `npx mcp-googlevoice` may run a different published package. Use the locally built server path when you want this version.
 
@@ -47,16 +49,16 @@ On a remote Linux server, interactive login may require a localhost SSH tunnel a
 | `gv_check_login` | Check whether the Google Voice inbox is accessible |
 | `gv_list_sms` | List conversations |
 | `gv_read_sms` | Read a conversation |
-| `gv_send_sms` | Send a new SMS |
-| `gv_reply_sms` | Reply to a conversation |
+| `gv_send_sms` | Send a separate SMS to one phone number |
+| `gv_reply_sms` | Disabled pending equivalent single-recipient safeguards |
 | `gv_mark_read` | Mark a conversation read |
 
 Opening a conversation can itself change its read status. Before using `gv_list_sms` for unread messages, inspect whether the current Google Voice interface still preserves unread state during listing.
 
 ## Sending behavior and limits
 
-The local changes fill the complete message without Enter keystrokes, verify the composed text before clicking Send once, and check visible Google Voice send errors. `gv_send_sms` can accept multiple recipients, which may create a group conversation; use one phone number per call for separate texts. A successful tool response means submission to the Google Voice interface, **not confirmed delivery**. Google Voice can reject, delay, or limit messages. Verify receipt or the conversation's status, and never automatically retry an uncertain send.
+Use the [shareable separate SMS prompt](SEPARATE-SMS-PROMPT.md) to collect recipient numbers and a message template.
+
+The local changes fill the complete message without Enter keystrokes, verify the composed text before clicking Send once, and check visible Google Voice send errors. `gv_send_sms` requires exactly one phone number per call and rejects recipient arrays. For multiple recipients, make one call at a time and stop on the first error or uncertain result. A successful tool response means submission to the Google Voice interface, **not confirmed delivery**. Google Voice can reject, delay, or limit messages. Verify receipt or the conversation's status, and never automatically retry an uncertain send.
 
 Do not commit `node_modules`, `dist`, state directories, browser profiles, cookies, or credentials. The included `.gitignore` excludes common local artifacts, but always review `git status` before publishing changes.
-
-
