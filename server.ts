@@ -6,21 +6,26 @@ import {
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js'
 import { ensureBrowser, launchLoginBrowser, closeBrowser, checkLoginStatus, REMOTE_DEBUG_PORT } from './browser.js'
-import { listSms, readConversation, sendSms, replySms, markAsRead } from './actions.js'
+import { listSms, readConversation, sendSms, replySms, markAsRead, CHIP_SELECTOR, chipNumbers } from './actions.js'
+import { number, suggestionNumber } from './safe-send.js'
 
 const server = new Server(
   { name: 'googlevoice', version: '0.0.1' },
-  { capabilities: { tools: {} } },
+  {
+    capabilities: { tools: {} },
+    instructions: 'For separate SMS outreach, ask for the recipient phone numbers and the message template if missing. Send only when the user explicitly authorizes sending. Use gv_send_sms once per unique number, sequentially, with a single phone_number string. Never use group SMS or reply tools for outreach. Stop on the first error or uncertain outcome. Never retry an uncertain send automatically. Report submission separately from delivery.',
+  },
 )
 
 // --- Tool Definitions ---
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    { name: 'gv_inspect_setup', description: 'Inspect recipient chips and composer; optionally open an empty composer or preview a number suggestion. Never sends.', inputSchema: { type: 'object' as const, properties: { open_composer: { type: 'boolean' }, preview_number: { type: 'string' } } } },
     {
       name: 'gv_login',
       description:
-        'Launch system Chrome with remote debugging for Google login. The user connects via SSH tunnel and chrome://inspect to complete login (including 2FA). After login, call gv_check_login to verify.',
+        'Open or bring forward the dedicated Google Voice Chrome window for interactive sign-in. On Windows, sign in directly in that window. After login, call gv_check_login to verify.',
       inputSchema: { type: 'object' as const, properties: {} },
     },
     {
@@ -73,16 +78,13 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: 'gv_send_sms',
-      description: 'Send a new SMS message to one or more phone numbers via Google Voice.',
+      description: 'Submit one separate SMS to exactly one phone number. Call sequentially, once per recipient. Stop on the first error or uncertain outcome.',
       inputSchema: {
         type: 'object' as const,
         properties: {
           phone_number: {
-            oneOf: [
-              { type: 'string' },
-              { type: 'array', items: { type: 'string' } }
-            ],
-            description: 'The recipient phone number(s) (e.g., "+1234567890" or ["+1234567890", "+0987654321"]).',
+            type: 'string',
+            description: 'Exactly one US phone number, preferably in +1 format.',
           },
           text: {
             type: 'string',
@@ -90,11 +92,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           },
         },
         required: ['phone_number', 'text'],
+        additionalProperties: false,
       },
     },
     {
       name: 'gv_reply_sms',
-      description: 'Reply to an existing SMS conversation.',
+      description: 'Unavailable. Use gv_send_sms for explicitly authorized messages to one phone number.',
       inputSchema: {
         type: 'object' as const,
         properties: {
@@ -142,17 +145,56 @@ async function requireLogin(): Promise<string | null> {
   if (!loggedIn) {
     return 'Not logged in to Google Voice. Please run gv_login first.'
   }
+  const expectedAccount = process.env.GOOGLEVOICE_EXPECTED_ACCOUNT
+  if (!expectedAccount) return 'Account ownership has not been configured; confirm the selected account first.'
+  const page = await ensureBrowser()
+  const label = await page.getByRole('button', { name: /Google Account:/ }).getAttribute('aria-label').catch(() => '')
+  if (!label?.includes('(' + expectedAccount + ')')) return 'Selected Google Voice account differs from the confirmed account. Stopped.'
   return null
 }
 
 server.setRequestHandler(CallToolRequestSchema, async (req) => {
   const args = (req.params.arguments ?? {}) as Record<string, unknown>
+  if (req.params.name === 'gv_send_sms') {
+    try { number(args.phone_number) } catch { return errorResult('Exactly one US phone_number string is required. Group sends are disabled.') }
+    if (Object.keys(args).some(key => key !== 'phone_number' && key !== 'text')) return errorResult('Only phone_number and text are accepted.')
+    if (typeof args.text !== 'string' || !args.text.trim()) return errorResult('Nonempty message text is required.')
+  }
   if (process.env.GOOGLEVOICE_ALLOW_WRITES !== '1' && ['gv_send_sms', 'gv_reply_sms', 'gv_mark_read'].includes(req.params.name)) {
     return errorResult('Writes disabled during setup. Enable GOOGLEVOICE_ALLOW_WRITES=1 only after authorizing a recipient and message.');
   }
 
   try {
     switch (req.params.name) {
+      case 'gv_inspect_setup': {
+        const loginErr = await requireLogin()
+        if (loginErr) return errorResult(loginErr)
+        const p = await ensureBrowser()
+        if (args.open_composer === true) {
+          await p.locator('[aria-label="Send new message"]').click({ timeout: 5000 })
+          await p.locator('input[placeholder="Type a name or phone number"], input[placeholder="Add recipients"]').first().waitFor({ timeout: 5000 })
+        }
+        let suggestionLabel: string | null = null
+        if (typeof args.preview_number === 'string') {
+          number(args.preview_number)
+          const input = p.locator('input[placeholder="Type a name or phone number"]')
+          if ((await chipNumbers(p)).length || await input.inputValue() || (await p.locator('textarea[placeholder="Type a message"]').inputValue()).length) return errorResult('Preview refused: composer is not empty')
+          try {
+            await input.fill(args.preview_number)
+            const label = p.locator('.send-to-label')
+            await label.waitFor({ timeout: 5000 })
+            suggestionLabel = await label.innerText()
+          } finally { await input.fill('') }
+        }
+        return textResult(JSON.stringify({
+          suggestionLabel,
+          normalizedSuggestion: suggestionLabel === null ? null : suggestionNumber(suggestionLabel),
+          chips: await chipNumbers(p),
+          recipientValues: await p.locator('input[placeholder="Type a name or phone number"], input[placeholder="Add recipients"]').evaluateAll(els => els.map(e => (e as HTMLInputElement).value)),
+          messageLengths: await p.locator('textarea[placeholder="Type a message"], input[placeholder="Type a message"]').evaluateAll(els => els.map(e => (e as HTMLInputElement).value.length)),
+          sendDisabled: await p.locator('button[aria-label="Send message"]').isDisabled({ timeout: 1000 }).catch(() => null),
+        }))
+      }
       // --- Login ---
       case 'gv_login': {
         // Launch system Chrome (not Playwright) to avoid Google's automation detection
@@ -175,7 +217,7 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
       case 'gv_check_login': {
         const loggedIn = await checkLoginStatus()
         if (loggedIn) {
-          return textResult('Logged in to Google Voice. All tools are ready to use.')
+          return textResult('Logged in to Google Voice. Sending remains subject to setup locks; account ownership must be confirmed by the user.')
         }
         return textResult(
           'Not logged in. Run gv_login to open a browser window and complete Google login.',
@@ -222,14 +264,14 @@ server.setRequestHandler(CallToolRequestSchema, async (req) => {
         const loginErr = await requireLogin()
         if (loginErr) return errorResult(loginErr)
 
-        const phoneNumber = args.phone_number as string | string[]
+        const phoneNumber = args.phone_number as string
         const text = args.text as string
-        if (!phoneNumber || !text) return errorResult('phone_number and text are required.')
+        if (typeof phoneNumber !== 'string' || typeof text !== 'string' || !text.trim()) return errorResult('phone_number and text are required.')
 
         const page = await ensureBrowser()
         const conversationId = await sendSms(page, phoneNumber, text)
 
-        const recipients = Array.isArray(phoneNumber) ? phoneNumber.join(', ') : phoneNumber
+        const recipients = phoneNumber
         return textResult(
           `SMS submitted to Google Voice for ${recipients}; delivery is not confirmed.` +
           (conversationId ? ` Conversation ID: ${conversationId}` : ''),

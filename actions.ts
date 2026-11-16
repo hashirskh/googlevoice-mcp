@@ -1,4 +1,18 @@
 import type { Page } from 'playwright'
+import { SafeSender, number, sameText, suggestionNumber, type SendUI } from './safe-send.js'
+import { existsSync, mkdirSync, writeFileSync, unlinkSync, openSync, closeSync } from 'node:fs'
+import { join } from 'node:path'
+import { homedir } from 'node:os'
+const stateDir = process.env.GOOGLEVOICE_STATE_DIR ?? join(homedir(), '.local', 'share', 'googlevoice')
+const stopFile = join(stateDir, 'send-stopped')
+const sender = new SafeSender(() => { mkdirSync(stateDir, { recursive: true }); const fd = openSync(stopFile, 'wx'); try { writeFileSync(fd, 'Human review required before another send. Do not automatically retry.\n') } finally { closeSync(fd) } })
+export const CHIP_SELECTOR = '[aria-label="Select recipients"] mat-chip-row'
+const REMOVE_CHIP = '[gv-test-id="chip-item-remove"]'
+export const chipNumbers = (p: Page) => p.locator(CHIP_SELECTOR).evaluateAll((chips, removeSelector) => chips.map(chip => {
+  const label = chip.querySelector(removeSelector)?.getAttribute('aria-label') ?? ''
+  return /^Remove (\+?[\d() .-]+)\?$/.exec(label)?.[1]?.trim() ?? ''
+}), REMOVE_CHIP)
+
 import { SELECTORS } from './selectors.js'
 import { navigateToMessages, navigateToConversation, VOICE_MESSAGES_URL } from './browser.js'
 import type { SmsConversation, SmsMessage } from './types.js'
@@ -37,62 +51,13 @@ export async function listSms(
     .filter(item => options.filter === 'all' || item.isUnread)
     .slice(0, options.limit)
 
-  // Second pass: extract conversation IDs by intercepting history.pushState
-  // on click, then restoring state — avoids navigating into the conversation
-  // which would mark it as read.
-  const conversations: SmsConversation[] = []
-  for (const item of filtered) {
-    const conversationId = await page.evaluate((params) => {
-      return new Promise<string>((resolve) => {
-        const origPush = history.pushState.bind(history)
-        const origReplace = history.replaceState.bind(history)
-
-        history.pushState = function() {
-          history.pushState = origPush
-          history.replaceState = origReplace
-          const url = arguments[2] as string | undefined
-          const match = url?.match(/itemId=([^&]+)/)
-          resolve(match ? decodeURIComponent(match[1]) : '')
-        }
-        history.replaceState = function() {
-          history.pushState = origPush
-          history.replaceState = origReplace
-          const url = arguments[2] as string | undefined
-          const match = url?.match(/itemId=([^&]+)/)
-          resolve(match ? decodeURIComponent(match[1]) : '')
-        }
-
-        const items = document.querySelectorAll(params.item)
-        const el = items[params.index]
-        const clickTarget = el?.querySelector(params.clickable) as HTMLElement
-        if (clickTarget) {
-          clickTarget.click()
-        }
-
-        // Fallback timeout
-        setTimeout(function() {
-          history.pushState = origPush
-          history.replaceState = origReplace
-          resolve('')
-        }, 3000)
-      })
-    }, { index: item.index, item: SELECTORS.CONVERSATION_ITEM, clickable: SELECTORS.CONVERSATION_CLICKABLE })
-
-    // After intercepting pushState, Angular may have partially updated the view.
-    // Navigate back to the messages list to reset state for the next item.
-    if (conversationId) {
-      await page.goto(VOICE_MESSAGES_URL, { waitUntil: 'load', timeout: 15000 })
-      await page.waitForSelector(SELECTORS.CONVERSATION_ITEM, { timeout: 10000 })
-    }
-
-    conversations.push({
-      conversationId,
-      contact: item.contact,
-      lastMessage: item.snippet,
-      lastTimestamp: item.timestamp,
-      isUnread: item.isUnread,
-    })
-  }
+  // Read attributes only: clicking a thread can mark an unread message as read.
+  const ids = await page.$$eval(SELECTORS.CONVERSATION_ITEM, els => els.map(el => {
+    const href = el.querySelector('a[href]')?.getAttribute('href')
+    if (href) return new URL(href, location.href).searchParams.get('itemId') || ''
+    return el.getAttribute('data-item-id') || el.getAttribute('data-thread-id') || ''
+  }))
+  const conversations = filtered.map(item => ({ conversationId: ids[item.index] || '', contact: item.contact, lastMessage: item.snippet, lastTimestamp: item.timestamp, isUnread: item.isUnread }))
 
   return conversations
 }
@@ -151,99 +116,74 @@ export async function readConversation(
 }
 
 
-async function checkSendError(page: Page): Promise<void> {
-  const status = (await page.locator('gv-message-list').allTextContents()).join(' ')
-  const match = status.match(/Message not delivered\.[^\n]*|You[’']ve sent too many messages\.?|Message failed to send|Unable to send|Failed to send/i)
-  if (match) throw new Error('Google Voice reports: ' + match[0] + ' Sending stopped; do not automatically retry.')
+export async function sendSms(page: Page, phoneNumber: unknown, text: unknown): Promise<string> {
+  number(phoneNumber)
+  if (process.env.GOOGLEVOICE_ALLOW_WRITES !== '1' || process.env.GOOGLEVOICE_LIVE_CHIPS_VERIFIED !== '1') throw new Error('Sending disabled: setup and live recipient-chip verification required')
+  if (existsSync(stopFile)) throw new Error('Sending stopped: previous attempt requires human review; never automatically retry')
+  const chips = page.locator(CHIP_SELECTOR)
+  const composer = page.locator(SELECTORS.COMPOSE_INPUT)
+  const recipient = page.locator(SELECTORS.RECIPIENT_INPUT + ', input[placeholder="Add recipients"]')
+  let beforeCount = 0
+  const ui: SendUI = {
+    async snapshot() {
+      const inputs = await recipient.all()
+      const texts = await composer.all()
+      return { chips: await chipNumbers(page), recipient: (await Promise.all(inputs.map(i => i.inputValue()))).join(''), text: (await Promise.all(texts.map(i => i.inputValue()))).join('') }
+    },
+    async open() { await navigateToMessages(page); await page.locator(SELECTORS.NEW_CONVERSATION_BUTTON).click({ timeout: 5000 }) },
+    async add(phone) {
+      await page.locator(SELECTORS.RECIPIENT_INPUT).fill(phone)
+      const suggestion = page.locator('.send-to-label')
+      await suggestion.waitFor({ timeout: 5000 })
+      if (suggestionNumber(await suggestion.innerText()) !== number(phone)) throw new Error('Recipient suggestion mismatch')
+      await suggestion.click()
+      await chips.first().waitFor({ state: 'visible', timeout: 5000 })
+    },
+    async fill(message) { beforeCount = await page.locator(SELECTORS.MESSAGE_BUBBLE).count(); await composer.fill(message) },
+    async error() {
+      const status = await page.locator('gv-message-list, [role="alert"], mat-snack-bar-container, .error').allTextContents()
+      if (/not delivered|too many messages|failed to send|unable to send|couldn.t send|could not send|try again/i.test(status.join(' '))) throw new Error('Google Voice error detected')
+    },
+    async clickOnce() {
+      // DOM click has no retry and no keyboard events. Reassert recipients/text in this same task.
+      await page.evaluate(({ chipSelector, removeSelector, composeSelector, sendSelector, expectedPhone, expectedText }) => {
+        const digits = (s: string) => { const d = s.replace(/\D/g, ''); return d.length === 10 ? '1'+d : d }
+        const c = Array.from(document.querySelectorAll(chipSelector))
+        const extra = Array.from(document.querySelectorAll('input[placeholder="Type a name or phone number"], input[placeholder="Add recipients"]')) as HTMLInputElement[]
+        const inputs = document.querySelectorAll(composeSelector)
+        const buttons = document.querySelectorAll(sendSelector)
+        const label = c[0]?.querySelector(removeSelector)?.getAttribute('aria-label') ?? ''
+        const phone = /^Remove (\+?[\d() .-]+)\?$/.exec(label)?.[1] ?? ''
+        if (c.length !== 1 || digits(phone) !== expectedPhone || extra.some(i => i.value.trim()) || inputs.length !== 1 || (inputs[0] as HTMLTextAreaElement).value.replace(/\r\n/g,'\n') !== expectedText.replace(/\r\n/g,'\n') || buttons.length !== 1 || (buttons[0] as HTMLButtonElement).disabled) throw new Error('Final recipient/text/button verification failed')
+        ;(buttons[0] as HTMLButtonElement).click()
+      }, { chipSelector: CHIP_SELECTOR, removeSelector: REMOVE_CHIP, composeSelector: SELECTORS.COMPOSE_INPUT, sendSelector: SELECTORS.SEND_BUTTON, expectedPhone: number(phoneNumber), expectedText: text as string })
+    },
+    async confirmed(phone, message) {
+      const intendedThread = (url: URL) => {
+        const id = url.searchParams.get('itemId') ?? ''
+        return url.origin === 'https://voice.google.com' && /^t\.\+?\d{10,11}$/.test(id) && number(id.slice(2)) === number(phone)
+      }
+      await page.waitForURL(intendedThread, { timeout: 12000 }).catch(() => { throw new Error('Intended one-to-one conversation unconfirmed') })
+      const id = new URL(page.url()).searchParams.get('itemId') || ''
+      if (!/^t\.\+?\d+$/.test(id) || number(id.slice(2)) !== number(phone)) throw new Error('Intended one-to-one conversation unconfirmed')
+      const bubble = page.locator(SELECTORS.MESSAGE_BUBBLE).last()
+      if (await page.locator(SELECTORS.MESSAGE_BUBBLE).count() <= beforeCount) throw new Error('No new message appeared after Send')
+      if (await bubble.locator(SELECTORS.MESSAGE_INCOMING).count()) throw new Error('Last message is incoming')
+      if (!sameText(await bubble.locator(SELECTORS.MESSAGE_TEXT).innerText(), message)) throw new Error('Submitted message not visible')
+      if (await composer.inputValue()) throw new Error('Composer did not clear')
+      return id
+    },
+    async abandon() { if (await composer.count() === 1) await composer.fill(''); await page.goto(VOICE_MESSAGES_URL, { waitUntil: 'load' }) },
+    async refresh() { await page.goto(VOICE_MESSAGES_URL, { waitUntil: 'load' }) },
+    async wait(ms) { await page.waitForTimeout(ms) },
+  }
+  const id = await sender.send(ui, phoneNumber, text)
+  unlinkSync(stopFile)
+  return id
 }
 
-export async function sendSms(
-  page: Page,
-  phoneNumber: string | string[],
-  text: string,
-): Promise<string> {
-  await navigateToMessages(page)
-
-  // A leftover call or menu overlay can intercept the New Message button.
-  await page.keyboard.press('Escape')
-  const backdrop = page.locator('.cdk-overlay-backdrop.cdk-overlay-backdrop-showing')
-  if (await backdrop.count()) await backdrop.last().click()
-
-  await page.click(SELECTORS.NEW_CONVERSATION_BUTTON, { timeout: 5000 })
-
-  const numbers = Array.isArray(phoneNumber) ? phoneNumber : [phoneNumber]
-
-  for (let i = 0; i < numbers.length; i++) {
-    const num = numbers[i]
-
-    // Wait for the appropriate input field
-    if (i === 0) {
-      const recipientInput = await page.waitForSelector(SELECTORS.RECIPIENT_INPUT, { timeout: 5000 })
-      await recipientInput.fill(num)
-    } else {
-      const addRecipientsInput = await page.waitForSelector('input[placeholder="Add recipients"]', { timeout: 5000 })
-      await addRecipientsInput.fill(num)
-    }
-
-    await page.waitForTimeout(2000)
-
-    // Click the "Send to <number>" popup that appears below the input
-    const popup = await page.waitForSelector('.send-to-label', { timeout: 5000 })
-    if (popup) {
-      await popup.click()
-    }
-
-    await page.waitForTimeout(1000)
-  }
-
-  // Dismiss any overlay and focus the compose area
-  await page.keyboard.press('Escape')
-  await page.waitForTimeout(300)
-
-  const composeInput = page.locator(SELECTORS.COMPOSE_INPUT).first()
-  await composeInput.click()
-  await page.waitForTimeout(200)
-  // Fill the complete message without Enter key events, which can send prematurely.
-  await composeInput.fill(text)
-  if ((await composeInput.inputValue()).replace(/\r\n/g, '\n') !== text.replace(/\r\n/g, '\n')) {
-    throw new Error('Compose text does not match the complete message; nothing was sent.')
-  }
-  await page.waitForTimeout(500)
-
-  await checkSendError(page)
-  const sendBtn = page.locator(SELECTORS.SEND_BUTTON).first()
-  await sendBtn.click()
-
-  await page.waitForTimeout(2000)
-
-  await checkSendError(page)
-
-  // Extract conversation ID from URL
-  const url = page.url()
-  const match = url.match(/itemId=([^&]+)/)
-  const conversationId = match ? decodeURIComponent(match[1]) : ''
-
-  return conversationId
-}
-
-export async function replySms(
-  page: Page,
-  conversationId: string,
-  text: string,
-): Promise<void> {
-  await navigateToConversation(page, conversationId)
-
-  const composeInput = page.locator(SELECTORS.COMPOSE_INPUT).first()
-  await composeInput.fill(text)
-  if ((await composeInput.inputValue()).replace(/\r\n/g, '\n') !== text.replace(/\r\n/g, '\n')) {
-    throw new Error('Compose text does not match the complete message; nothing was sent.')
-  }
-
-  await checkSendError(page)
-  await page.click(SELECTORS.SEND_BUTTON, { timeout: 5000 })
-
-  await page.waitForTimeout(2000)
-  await checkSendError(page)
+export async function replySms(_page: Page, _conversationId: string, _text: string): Promise<void> {
+  throw new Error('Reply disabled: use a separately authorized single phone number through guarded send')
 }
 
 export async function markAsRead(

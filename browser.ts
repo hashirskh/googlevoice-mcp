@@ -2,7 +2,7 @@ import { chromium, type Browser, type BrowserContext, type Page } from 'playwrig
 import { mkdirSync, rmSync, existsSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
-import { execSync, spawn, type ChildProcess } from 'node:child_process'
+import { execSync, execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { SELECTORS } from './selectors.js'
 
 const STATE_DIR = process.env.GOOGLEVOICE_STATE_DIR
@@ -64,7 +64,15 @@ async function isChromeRunning(): Promise<boolean> {
   try {
     const response = await fetch('http://127.0.0.1:' + REMOTE_DEBUG_PORT + '/json/version', { signal: AbortSignal.timeout(1000) });
     const data = await response.json() as { webSocketDebuggerUrl?: string };
-    return response.ok && Boolean(data.webSocketDebuggerUrl);
+    if (!response.ok || !data.webSocketDebuggerUrl) return false;
+    if (process.platform === 'win32') {
+      const script = "$profile=$env:GV_EXPECTED_PROFILE; $port=$env:GV_EXPECTED_PORT; @(Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'chrome.exe' -and $_.CommandLine -like ('*--remote-debugging-port=' + $port + '*') -and $_.CommandLine -like ('*--user-data-dir=' + $profile + '*') -and $_.CommandLine -notlike '*--type=*' }).Count";
+      const count = Number(execFileSync('powershell.exe', ['-NoProfile', '-Command', script], {
+        encoding: 'utf8', timeout: 5000, env: { ...process.env, GV_EXPECTED_PROFILE: PROFILE_DIR, GV_EXPECTED_PORT: String(REMOTE_DEBUG_PORT) },
+      }).trim());
+      if (count !== 1) throw new Error('Debug port belongs to a different or ambiguous Chrome profile');
+    }
+    return true;
   } catch { return false; }
 }
 
@@ -92,7 +100,7 @@ async function launchChrome(url?: string): Promise<void> {
 
   chromeProcess = spawn(chromePath, args, {
     stdio: 'ignore',
-    windowsHide: true,
+    windowsHide: false,
     detached: true,       // survive MCP server shutdown
     env: { ...process.env },
   })
@@ -112,14 +120,14 @@ async function launchChrome(url?: string): Promise<void> {
 }
 
 /** Connect Playwright to the running system Chrome via CDP */
-async function connectPlaywright(): Promise<Page> {
+async function connectPlaywright(preserveSignIn = false): Promise<Page> {
   if (browser && page && !page.isClosed()) {
     return page
   }
 
   // Disconnect old connection if stale
   if (browser) {
-    try { browser.close() } catch {}
+    try { await browser.close() } catch {}
     browser = null
     page = null
   }
@@ -130,15 +138,19 @@ async function connectPlaywright(): Promise<Page> {
   const ctx = contexts[0]
   if (!ctx) throw new Error('No browser context found')
 
-  // Find an existing Google Voice page, or use the first available page
   const pages = ctx.pages()
-  page = pages.find(p => new URL(p.url()).hostname === 'voice.google.com')
-    ?? pages[0]
+  const hostnameOf = (p: Page) => {
+    try { return new URL(p.url()).hostname } catch { return undefined }
+  }
+  page = pages.find(p => hostnameOf(p) === 'voice.google.com')
+    ?? (preserveSignIn ? pages.find(p => hostnameOf(p) === 'accounts.google.com') : undefined)
+    ?? pages.find(p => !p.url() || p.url() === 'about:blank' || p.url() === 'chrome://newtab/')
     ?? await ctx.newPage()
 
   // If no Voice page was found, navigate to it
-  if (new URL(page.url()).hostname !== 'voice.google.com') {
-    await page.goto(VOICE_MESSAGES_URL, { waitUntil: 'load', timeout: 15000 })
+  const hostname = hostnameOf(page)
+  if (hostname !== 'voice.google.com' && !(preserveSignIn && hostname === 'accounts.google.com')) {
+    await page.goto(VOICE_MESSAGES_URL, { waitUntil: 'domcontentloaded', timeout: 15000 })
   }
 
   return page
@@ -149,8 +161,8 @@ async function connectPlaywright(): Promise<Page> {
  * User connects via SSH tunnel + chrome://inspect to complete Google login.
  */
 export async function launchLoginBrowser(): Promise<string> {
-  await shutdownBrowser()
-  await launchChrome(VOICE_MESSAGES_URL)
+  const loginPage = await getBrowserPage(true)
+  await loginPage.bringToFront()
   return findSystemChrome()
 }
 
@@ -159,6 +171,10 @@ export async function launchLoginBrowser(): Promise<string> {
  * Launches system Chrome if needed, then connects via CDP.
  */
 export async function ensureBrowser(): Promise<Page> {
+  return getBrowserPage(false)
+}
+
+async function getBrowserPage(interactive: boolean): Promise<Page> {
   resetIdleTimer()
 
   if (browser && page && !page.isClosed()) {
@@ -169,8 +185,8 @@ export async function ensureBrowser(): Promise<Page> {
   if (ensureLock) return ensureLock
   ensureLock = (async () => {
     try {
-      await launchChrome()
-      return await connectPlaywright()
+      await launchChrome(interactive ? VOICE_MESSAGES_URL : undefined)
+      return await connectPlaywright(interactive)
     } finally {
       ensureLock = null
     }
